@@ -36,9 +36,10 @@ async function decodeAudioData(data: Uint8Array, ctx: AudioContext, sampleRate: 
 }
 
 const VoiceCall: React.FC<VoiceCallProps> = ({ gender, onClose }) => {
-  const [permissionState, setPermissionState] = useState<'pending' | 'requesting' | 'granted' | 'denied'>('pending');
+  const [permissionState, setPermissionState] = useState<'pending' | 'requesting' | 'granted' | 'denied' | 'error'>('pending');
+  const [errorMessage, setErrorMessage] = useState<string>('');
   const [isMuted, setIsMuted] = useState(false);
-  const [callStatus, setCallStatus] = useState('Idle');
+  const [callStatus, setCallStatus] = useState('Taiyar hain');
   const [isModelSpeaking, setIsModelSpeaking] = useState(false);
   const [duration, setDuration] = useState(0);
   const [waveformData, setWaveformData] = useState<number[]>(new Array(40).fill(2));
@@ -55,21 +56,43 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ gender, onClose }) => {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // Check if permission was already granted previously
+  useEffect(() => {
+    if (navigator.permissions && navigator.permissions.query) {
+      navigator.permissions.query({ name: 'microphone' as PermissionName }).then((result) => {
+        if (result.state === 'granted') {
+          // We still need a user gesture to start AudioContext, 
+          // so we don't auto-start the call, but we can show 'granted' state.
+          setPermissionState('pending'); 
+        } else if (result.state === 'denied') {
+          setPermissionState('denied');
+        }
+      });
+    }
+  }, []);
+
   const handleStartCall = async () => {
     setPermissionState('requesting');
-    setCallStatus('Mic Access Maang Rahe Hain...');
+    setCallStatus('Mic Access check ho raha hai...');
     
     try {
-      // Explicitly request microphone access
+      // 1. Request microphone access
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      
+      // 2. Initialize AudioContexts (MUST happen inside a click handler)
+      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      
+      // Explicitly resume in case it's suspended
+      await inputCtx.resume();
+      await outputCtx.resume();
+      
+      audioContextsRef.current = { input: inputCtx, output: outputCtx };
       setPermissionState('granted');
       setCallStatus('Connecting to Sahara...');
 
+      // 3. Connect to Gemini API
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
-      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      audioContextsRef.current = { input: inputCtx, output: outputCtx };
-
       const voiceName = gender === 'female' ? 'Kore' : 'Puck';
       const persona = gender === 'female' ? "Elder Sister (Badi Behen)" : "Elder Brother (Bada Bhai)";
 
@@ -127,22 +150,35 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ gender, onClose }) => {
           },
           onclose: () => onClose(),
           onerror: (e) => {
-            console.error(e);
+            console.error('Session Error:', e);
             setCallStatus('Call Interrupted');
           }
         },
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
-          systemInstruction: `Aap Sahara hain, user ke ${persona}. Tone: Caring and empathetic sibling. Focus on active listening. Use Hinglish naturally. Keep responses human-like with fillers.`,
+          systemInstruction: `Aap Sahara hain, user ke ${persona}. Tone: Supportive, empathetic, and protective sibling. Focus on listening. Use Hinglish. Responses should be natural for a voice call.`,
         }
       });
 
       sessionRef.current = await sessionPromise;
-    } catch (err) {
-      console.error('Permission Error:', err);
-      setPermissionState('denied');
-      setCallStatus('Permission Denied');
+    } catch (err: any) {
+      console.error('Detailed Permission Error:', err);
+      
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        setPermissionState('denied');
+        setErrorMessage('Aapne mic permission block kar di hai.');
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        setPermissionState('error');
+        setErrorMessage('Aapke device mein mic nahi mila.');
+      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+        setPermissionState('error');
+        setErrorMessage('Mic koi aur app use kar raha hai.');
+      } else {
+        setPermissionState('error');
+        setErrorMessage('Mic chalu karne mein koi takleef hui hai.');
+      }
+      setCallStatus('Permission Error');
     }
   };
 
@@ -166,48 +202,46 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ gender, onClose }) => {
     }
   }, [isModelSpeaking]);
 
-  // Initial Permission Interface
-  if (permissionState === 'pending' || permissionState === 'requesting' || permissionState === 'denied') {
+  // Initial Permission Interface (Pending, Requesting, Denied, Error)
+  if (permissionState !== 'granted') {
     return (
       <div className="flex-1 flex flex-col items-center justify-center p-8 bg-[#020617] text-white text-center">
         <div className="relative mb-12">
-          {/* Status-based Visual Feedback */}
+          {/* Animated rings for status */}
           <div className={`w-36 h-36 rounded-full border-4 border-dashed transition-all duration-700 
             ${permissionState === 'requesting' ? 'border-yellow-500 animate-spin' : 
-              permissionState === 'denied' ? 'border-red-500' : 'border-slate-500/30'}`} 
+              permissionState === 'denied' ? 'border-red-500' : 
+              permissionState === 'error' ? 'border-orange-500' : 'border-slate-500/30'}`} 
           />
           <div className="absolute inset-0 flex items-center justify-center">
             <div className={`w-28 h-28 rounded-full flex items-center justify-center text-6xl shadow-2xl transition-all duration-500 
-              ${permissionState === 'denied' ? 'bg-red-600 scale-90' : 
+              ${permissionState === 'denied' || permissionState === 'error' ? 'bg-red-600 scale-90 shadow-red-500/20' : 
                 gender === 'female' ? 'bg-rose-500 shadow-rose-500/20' : 'bg-indigo-500 shadow-indigo-500/20'}`}>
-              {permissionState === 'denied' ? '🔇' : (gender === 'female' ? '👩‍💼' : '👨‍💼')}
+              {permissionState === 'denied' ? '🚫' : (permissionState === 'error' ? '⚠️' : (gender === 'female' ? '👩‍💼' : '👨‍💼'))}
             </div>
           </div>
         </div>
         
         <div className="space-y-4 max-w-sm mx-auto mb-12">
           <h2 className="text-3xl font-black tracking-tight">
-            {permissionState === 'denied' ? 'Mic Permission Blocked' : 'Sahara Voice Support'}
+            {permissionState === 'denied' ? 'Mic Permission Blocked' : 
+             permissionState === 'error' ? 'Mic Error' : 'Sahara Voice Support'}
           </h2>
           
-          <div className="bg-white/5 rounded-2xl p-4 border border-white/10">
+          <div className="bg-white/5 rounded-2xl p-5 border border-white/10 shadow-inner">
             <p className="text-slate-400 text-sm leading-relaxed">
-              {permissionState === 'pending' && `Aap apne ${gender === 'female' ? 'Badi Behen' : 'Bada Bhai'} se baat karne ke liye mic allow karein.`}
-              {permissionState === 'requesting' && 'Niche click karke browser prompt mein "Allow" button dabaein.'}
+              {permissionState === 'pending' && `Baat karne ke liye mic permission ki zarurat hai. "Allow Mic" button daba kar mic chalu karein.`}
+              {permissionState === 'requesting' && 'Niche "Allow" par click karein jab browser prompt puche.'}
               {permissionState === 'denied' && (
                 <>
                   Mic access block ho gaya hai. <br/>
-                  Address bar ke upar <strong>Lock (🔒) icon</strong> pe click karein aur <strong>Microphone ON</strong> karein.
+                  Address bar mein <strong>Lock (🔒) icon</strong> pe click karein aur <strong>Microphone ON</strong> karein.
                 </>
               )}
+              {permissionState === 'error' && (
+                <span className="text-orange-400 font-medium">{errorMessage}</span>
+              )}
             </p>
-          </div>
-
-          {/* Status Indicator Bar */}
-          <div className="flex items-center justify-center gap-2 mt-4">
-            <div className={`h-1 flex-1 rounded-full ${permissionState !== 'pending' ? 'bg-green-500' : 'bg-slate-700'}`} title="Ready"/>
-            <div className={`h-1 flex-1 rounded-full ${permissionState === 'requesting' ? 'bg-yellow-500 animate-pulse' : permissionState === 'granted' ? 'bg-green-500' : 'bg-slate-700'}`} title="Requesting"/>
-            <div className={`h-1 flex-1 rounded-full ${permissionState === 'granted' ? 'bg-green-500' : 'bg-slate-700'}`} title="Success"/>
           </div>
         </div>
 
@@ -216,21 +250,23 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ gender, onClose }) => {
             onClick={handleStartCall}
             disabled={permissionState === 'requesting'}
             className={`group w-full py-5 rounded-[2rem] font-black text-lg shadow-2xl active:scale-95 transition-all flex items-center justify-center gap-4 disabled:opacity-50
-              ${permissionState === 'denied' ? 'bg-red-600 hover:bg-red-500 shadow-red-500/20' : 
+              ${permissionState === 'denied' || permissionState === 'error' ? 'bg-red-600 hover:bg-red-500 shadow-red-500/40' : 
                 gender === 'female' ? 'bg-rose-600 hover:bg-rose-500' : 'bg-indigo-600 hover:bg-indigo-500'}`}
           >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-            </svg>
-            {permissionState === 'denied' ? 'Try Enabling Mic Again' : 'Allow Mic & Start'}
+            <div className={`p-1.5 rounded-full bg-white/20 ${permissionState === 'requesting' ? 'animate-spin' : ''}`}>
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+              </svg>
+            </div>
+            {permissionState === 'denied' || permissionState === 'error' ? 'Try Again' : 'Allow Mic & Start'}
           </button>
 
-          {permissionState === 'denied' && (
+          {(permissionState === 'denied' || permissionState === 'error') && (
             <button 
               onClick={() => window.location.reload()}
               className="w-full py-4 rounded-2xl bg-white text-black font-black active:scale-95 transition-all shadow-xl"
             >
-              Refresh Entire Page
+              Refresh Page
             </button>
           )}
         </div>
@@ -247,7 +283,7 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ gender, onClose }) => {
       <div className="text-center">
         <div className="flex items-center justify-center gap-2 text-[10px] font-black uppercase tracking-[0.4em] text-white/20 mb-4">
           <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_10px_#10b981]" />
-          Mic Permission Granted
+          Private Call Active
         </div>
         <h2 className="text-4xl font-black tracking-tighter mb-1">
           {gender === 'female' ? 'Badi Behen' : 'Bada Bhai'}
