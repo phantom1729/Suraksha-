@@ -43,10 +43,15 @@ const App: React.FC = () => {
     setIsTyping(true);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+      const apiKey = process.env.API_KEY || '';
+      if (!apiKey || apiKey === 'undefined') {
+        throw new Error("API Key missing on client side. Check Vercel environment variables.");
+      }
+
+      const ai = new GoogleGenAI({ apiKey });
       const persona = gender === 'female' ? "Elder Sister (Badi Behen)" : "Elder Brother (Bada Bhai)";
       
-      const systemInstruction = `Role: You are Sahara, a real ${persona}. Tone: Supportive, protective, non-judgmental. Use Hinglish naturally. Phrases: "Main hoon na", "Daro mat", "Sab theek ho jayega". Audience: A young person in India.`;
+      const systemInstruction = `Role: You are Sahara, a real ${persona}. Tone: Supportive, protective, non-judgmental. Use Hinglish naturally. Phrases: "Main hoon na", "Daro mat", "Sab theek ho jayega". Audience: A young person in India. Keep it empathic and helpful.`;
 
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
@@ -63,8 +68,14 @@ const App: React.FC = () => {
         text: response.text || "Main sun rahi hoon, batao...",
         timestamp: new Date()
       }]);
-    } catch (error) {
-      console.error(error);
+    } catch (error: any) {
+      console.error("Chat Error:", error);
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        role: 'model',
+        text: "Maaf karna, connection mein thodi dikkat aa rahi hai. Kya aap check kar sakte hain ki internet theek hai? (Technical Error: " + (error.message || "Unknown") + ")",
+        timestamp: new Date()
+      }]);
     } finally {
       setIsTyping(false);
     }
@@ -98,7 +109,7 @@ const App: React.FC = () => {
       </main>
 
       <footer className="p-2 text-center text-[9px] text-slate-300 font-bold uppercase tracking-widest border-t border-slate-50">
-        Sahara Virtual Sibling Experience
+        Sahara Private & Secure Experience
       </footer>
     </div>
   );
