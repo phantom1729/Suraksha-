@@ -38,8 +38,8 @@ async function decodeAudioData(data: Uint8Array, ctx: AudioContext, sampleRate: 
 const VoiceCall: React.FC<VoiceCallProps> = ({ gender, onClose }) => {
   const [permissionState, setPermissionState] = useState<'pending' | 'requesting' | 'granted' | 'denied' | 'error'>('pending');
   const [errorMessage, setErrorMessage] = useState<string>('');
+  const [callStatus, setCallStatus] = useState('Line taiyar hai');
   const [isMuted, setIsMuted] = useState(false);
-  const [callStatus, setCallStatus] = useState('Taiyar hain');
   const [isModelSpeaking, setIsModelSpeaking] = useState(false);
   const [duration, setDuration] = useState(0);
   const [waveformData, setWaveformData] = useState<number[]>(new Array(40).fill(2));
@@ -56,42 +56,27 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ gender, onClose }) => {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Check if permission was already granted previously
-  useEffect(() => {
-    if (navigator.permissions && navigator.permissions.query) {
-      navigator.permissions.query({ name: 'microphone' as PermissionName }).then((result) => {
-        if (result.state === 'granted') {
-          // We still need a user gesture to start AudioContext, 
-          // so we don't auto-start the call, but we can show 'granted' state.
-          setPermissionState('pending'); 
-        } else if (result.state === 'denied') {
-          setPermissionState('denied');
-        }
-      });
-    }
-  }, []);
-
   const handleStartCall = async () => {
     setPermissionState('requesting');
-    setCallStatus('Mic Access check ho raha hai...');
+    setCallStatus('Mic check kar rahe hain...');
     
+    let stream: MediaStream;
     try {
-      // 1. Request microphone access
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Step 1: Request Mic
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
-      // 2. Initialize AudioContexts (MUST happen inside a click handler)
-      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      
-      // Explicitly resume in case it's suspended
-      await inputCtx.resume();
-      await outputCtx.resume();
-      
-      audioContextsRef.current = { input: inputCtx, output: outputCtx };
+      // Step 2: Immediately set to granted so we don't show the error UI
       setPermissionState('granted');
       setCallStatus('Connecting to Sahara...');
+      
+      // Step 3: Setup Audio
+      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      await inputCtx.resume();
+      await outputCtx.resume();
+      audioContextsRef.current = { input: inputCtx, output: outputCtx };
 
-      // 3. Connect to Gemini API
+      // Step 4: Connect AI
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
       const voiceName = gender === 'female' ? 'Kore' : 'Puck';
       const persona = gender === 'female' ? "Elder Sister (Badi Behen)" : "Elder Brother (Bada Bhai)";
@@ -101,19 +86,15 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ gender, onClose }) => {
         callbacks: {
           onopen: () => {
             setCallStatus('Connected');
-            timerRef.current = window.setInterval(() => {
-              setDuration(prev => prev + 1);
-            }, 1000);
+            timerRef.current = window.setInterval(() => setDuration(prev => prev + 1), 1000);
 
             const source = inputCtx.createMediaStreamSource(stream);
             const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
-            
             scriptProcessor.onaudioprocess = (e) => {
               if (isMuted) return;
               const inputData = e.inputBuffer.getChannelData(0);
               const int16 = new Int16Array(inputData.length);
               for (let i = 0; i < inputData.length; i++) int16[i] = inputData[i] * 32768;
-              
               sessionPromise.then(s => s.sendRealtimeInput({
                 media: { data: encode(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=16000' }
               }));
@@ -138,7 +119,6 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ gender, onClose }) => {
               source.start(nextStartTimeRef.current);
               nextStartTimeRef.current += audioBuffer.duration;
               sourcesRef.current.add(source);
-              
               setWaveformData(Array.from({ length: 40 }, () => Math.random() * 80 + 20));
             }
             if (message.serverContent?.interrupted) {
@@ -151,34 +131,29 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ gender, onClose }) => {
           onclose: () => onClose(),
           onerror: (e) => {
             console.error('Session Error:', e);
-            setCallStatus('Call Interrupted');
+            setCallStatus('Connection Lost');
           }
         },
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
-          systemInstruction: `Aap Sahara hain, user ke ${persona}. Tone: Supportive, empathetic, and protective sibling. Focus on listening. Use Hinglish. Responses should be natural for a voice call.`,
+          systemInstruction: `Aap Sahara hain, user ke ${persona}. Tone: Supportive, protective sibling. Use Hinglish naturally. Keep responses concise and human.`,
         }
       });
 
       sessionRef.current = await sessionPromise;
     } catch (err: any) {
-      console.error('Detailed Permission Error:', err);
-      
+      console.error('Mic Failure:', err);
+      // ONLY show denied UI if the browser explicitly says no
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
         setPermissionState('denied');
-        setErrorMessage('Aapne mic permission block kar di hai.');
-      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-        setPermissionState('error');
-        setErrorMessage('Aapke device mein mic nahi mila.');
-      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-        setPermissionState('error');
-        setErrorMessage('Mic koi aur app use kar raha hai.');
+        setErrorMessage('Aapne Mic permission block ki hai.');
       } else {
+        // Otherwise, it's a hardware/browser/network error
         setPermissionState('error');
-        setErrorMessage('Mic chalu karne mein koi takleef hui hai.');
+        setErrorMessage(err.message || 'Mic chalu nahi ho raha. Check karein device plugged in hai?');
       }
-      setCallStatus('Permission Error');
+      setCallStatus('Error occurred');
     }
   };
 
@@ -202,12 +177,14 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ gender, onClose }) => {
     }
   }, [isModelSpeaking]);
 
-  // Initial Permission Interface (Pending, Requesting, Denied, Error)
+  // Initial UI (Pre-call)
   if (permissionState !== 'granted') {
     return (
       <div className="flex-1 flex flex-col items-center justify-center p-8 bg-[#020617] text-white text-center">
         <div className="relative mb-12">
-          {/* Animated rings for status */}
+          {/* Animated Background Pulse */}
+          <div className={`absolute -inset-8 blur-3xl opacity-20 rounded-full animate-pulse ${gender === 'female' ? 'bg-rose-500' : 'bg-indigo-500'}`} />
+          
           <div className={`w-36 h-36 rounded-full border-4 border-dashed transition-all duration-700 
             ${permissionState === 'requesting' ? 'border-yellow-500 animate-spin' : 
               permissionState === 'denied' ? 'border-red-500' : 
@@ -215,7 +192,7 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ gender, onClose }) => {
           />
           <div className="absolute inset-0 flex items-center justify-center">
             <div className={`w-28 h-28 rounded-full flex items-center justify-center text-6xl shadow-2xl transition-all duration-500 
-              ${permissionState === 'denied' || permissionState === 'error' ? 'bg-red-600 scale-90 shadow-red-500/20' : 
+              ${permissionState === 'denied' || permissionState === 'error' ? 'bg-red-600 scale-90' : 
                 gender === 'female' ? 'bg-rose-500 shadow-rose-500/20' : 'bg-indigo-500 shadow-indigo-500/20'}`}>
               {permissionState === 'denied' ? '🚫' : (permissionState === 'error' ? '⚠️' : (gender === 'female' ? '👩‍💼' : '👨‍💼'))}
             </div>
@@ -225,21 +202,21 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ gender, onClose }) => {
         <div className="space-y-4 max-w-sm mx-auto mb-12">
           <h2 className="text-3xl font-black tracking-tight">
             {permissionState === 'denied' ? 'Mic Permission Blocked' : 
-             permissionState === 'error' ? 'Mic Error' : 'Sahara Voice Support'}
+             permissionState === 'error' ? 'Mic Hardware Issue' : 'Sahara Voice Call'}
           </h2>
           
-          <div className="bg-white/5 rounded-2xl p-5 border border-white/10 shadow-inner">
+          <div className="bg-white/5 rounded-2xl p-5 border border-white/10">
             <p className="text-slate-400 text-sm leading-relaxed">
-              {permissionState === 'pending' && `Baat karne ke liye mic permission ki zarurat hai. "Allow Mic" button daba kar mic chalu karein.`}
-              {permissionState === 'requesting' && 'Niche "Allow" par click karein jab browser prompt puche.'}
+              {permissionState === 'pending' && `Baat karne ke liye "Allow Mic" par click karein. Agar prompt nahi aata, toh browser refresh karein.`}
+              {permissionState === 'requesting' && 'Niche "Allow" par click karein...'}
               {permissionState === 'denied' && (
                 <>
                   Mic access block ho gaya hai. <br/>
-                  Address bar mein <strong>Lock (🔒) icon</strong> pe click karein aur <strong>Microphone ON</strong> karein.
+                  Top left address bar mein <strong>Lock (🔒) icon</strong> par click karke mic <strong>Enable</strong> karein.
                 </>
               )}
               {permissionState === 'error' && (
-                <span className="text-orange-400 font-medium">{errorMessage}</span>
+                <span className="text-orange-400 font-bold">{errorMessage}</span>
               )}
             </p>
           </div>
@@ -250,71 +227,57 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ gender, onClose }) => {
             onClick={handleStartCall}
             disabled={permissionState === 'requesting'}
             className={`group w-full py-5 rounded-[2rem] font-black text-lg shadow-2xl active:scale-95 transition-all flex items-center justify-center gap-4 disabled:opacity-50
-              ${permissionState === 'denied' || permissionState === 'error' ? 'bg-red-600 hover:bg-red-500 shadow-red-500/40' : 
+              ${permissionState === 'denied' || permissionState === 'error' ? 'bg-red-600 hover:bg-red-500' : 
                 gender === 'female' ? 'bg-rose-600 hover:bg-rose-500' : 'bg-indigo-600 hover:bg-indigo-500'}`}
           >
-            <div className={`p-1.5 rounded-full bg-white/20 ${permissionState === 'requesting' ? 'animate-spin' : ''}`}>
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-              </svg>
-            </div>
-            {permissionState === 'denied' || permissionState === 'error' ? 'Try Again' : 'Allow Mic & Start'}
+            <svg xmlns="http://www.w3.org/2000/svg" className={`h-6 w-6 ${permissionState === 'requesting' ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+            </svg>
+            {permissionState === 'denied' || permissionState === 'error' ? 'Retry Connecting' : 'Start Call Now'}
           </button>
 
           {(permissionState === 'denied' || permissionState === 'error') && (
             <button 
               onClick={() => window.location.reload()}
-              className="w-full py-4 rounded-2xl bg-white text-black font-black active:scale-95 transition-all shadow-xl"
+              className="w-full py-4 rounded-2xl bg-white text-black font-black active:scale-95 transition-all"
             >
               Refresh Page
             </button>
           )}
         </div>
 
-        <button onClick={onClose} className="mt-12 text-slate-500 font-black uppercase tracking-[0.2em] text-[10px] hover:text-white transition-colors">Abhi Nahi / Back to Chat</button>
+        <button onClick={onClose} className="mt-12 text-slate-500 font-black uppercase tracking-[0.2em] text-[10px]">Abhi Nahi / Piche Jayein</button>
       </div>
     );
   }
 
-  // Active Call Screen (Granted)
+  // Active UI
   return (
-    <div className="flex-1 flex flex-col items-center justify-between py-16 px-8 bg-[#030712] text-white animate-in fade-in zoom-in-95 duration-700">
-      
+    <div className="flex-1 flex flex-col items-center justify-between py-16 px-8 bg-[#030712] text-white animate-in fade-in duration-700">
       <div className="text-center">
         <div className="flex items-center justify-center gap-2 text-[10px] font-black uppercase tracking-[0.4em] text-white/20 mb-4">
           <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_10px_#10b981]" />
-          Private Call Active
+          Secured Voice Line
         </div>
         <h2 className="text-4xl font-black tracking-tighter mb-1">
           {gender === 'female' ? 'Badi Behen' : 'Bada Bhai'}
         </h2>
-        <p className={`text-sm font-bold tracking-widest font-mono transition-all duration-500 ${callStatus === 'Connected' ? 'text-emerald-400' : 'text-slate-500'}`}>
+        <p className={`text-sm font-bold tracking-widest font-mono ${callStatus === 'Connected' ? 'text-emerald-400' : 'text-slate-500'}`}>
           {callStatus === 'Connected' ? formatDuration(duration) : callStatus}
         </p>
       </div>
 
       <div className="relative w-full flex flex-col items-center">
         <div className={`absolute w-80 h-80 blur-[130px] rounded-full opacity-30 transition-all duration-1000 ${gender === 'female' ? 'bg-rose-500' : 'bg-indigo-500'} ${isModelSpeaking ? 'scale-125' : 'scale-90'}`} />
-        
         <div className={`relative z-10 w-60 h-80 rounded-[4rem] bg-gradient-to-b from-white/10 to-transparent backdrop-blur-3xl border border-white/5 flex flex-col items-center justify-center shadow-2xl transition-all duration-500 ${isModelSpeaking ? 'scale-105 border-white/20' : 'scale-100'}`}>
-          <div className="text-[130px] mb-4 select-none animate-float drop-shadow-[0_20px_50px_rgba(0,0,0,0.5)]">
+          <div className="text-[130px] mb-4 select-none animate-float drop-shadow-2xl">
             {gender === 'female' ? '👩‍💼' : '👨‍💼'}
           </div>
-          {isModelSpeaking && (
-            <div className={`absolute inset-0 rounded-[4rem] border-2 animate-ping opacity-10 pointer-events-none ${gender === 'female' ? 'border-rose-400' : 'border-indigo-400'}`} />
-          )}
         </div>
-
         <div className="flex items-center justify-center gap-[3px] h-24 w-full mt-12 px-6">
           {waveformData.map((h, i) => (
-            <div 
-              key={i} 
-              className={`w-1 rounded-full transition-all duration-150 ${gender === 'female' ? 'bg-rose-500' : 'bg-indigo-500'}`}
-              style={{ 
-                height: `${h}%`,
-                opacity: isModelSpeaking ? 1 : 0.1,
-                filter: isModelSpeaking ? `drop-shadow(0 0 8px ${gender === 'female' ? '#fb7185' : '#818cf8'})` : 'none'
-              }}
+            <div key={i} className={`w-1 rounded-full transition-all duration-150 ${gender === 'female' ? 'bg-rose-500' : 'bg-indigo-500'}`}
+              style={{ height: `${h}%`, opacity: isModelSpeaking ? 1 : 0.1, filter: isModelSpeaking ? `drop-shadow(0 0 8px ${gender === 'female' ? '#fb7185' : '#818cf8'})` : 'none' }}
             />
           ))}
         </div>
@@ -322,54 +285,29 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ gender, onClose }) => {
 
       <div className="w-full max-w-sm flex items-center justify-center gap-12 mb-4">
         <div className="flex flex-col items-center gap-3">
-          <button 
-            onClick={() => setIsMuted(!isMuted)}
-            className={`w-16 h-16 rounded-full flex items-center justify-center transition-all active:scale-90 ${isMuted ? 'bg-white text-black shadow-xl' : 'bg-white/5 border border-white/10 text-white hover:bg-white/10'}`}
+          <button onClick={() => setIsMuted(!isMuted)}
+            className={`w-16 h-16 rounded-full flex items-center justify-center transition-all ${isMuted ? 'bg-white text-black' : 'bg-white/5 border border-white/10 text-white'}`}
           >
-            {isMuted ? (
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-7 w-7" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM12.293 7.293a1 1 0 011.414 0L15 8.586l1.293-1.293a1 1 0 111.414 1.414L16.414 10l1.293 1.293a1 1 0 01-1.414 1.414L15 11.414l-1.293 1.293a1 1 0 01-1.414-1.414L13.586 10l-1.293-1.293a1 1 0 010-1.414z" clipRule="evenodd" />
-              </svg>
-            ) : (
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-7 w-7" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0 5 5 0 01-10 0 1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z" clipRule="evenodd" />
-              </svg>
-            )}
+            {isMuted ? <svg className="h-7 w-7" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM12.293 7.293a1 1 0 011.414 0L15 8.586l1.293-1.293a1 1 0 111.414 1.414L16.414 10l1.293 1.293a1 1 0 01-1.414 1.414L15 11.414l-1.293 1.293a1 1 0 01-1.414-1.414L13.586 10l-1.293-1.293a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
+                   : <svg className="h-7 w-7" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0 5 5 0 01-10 0 1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z" clipRule="evenodd" /></svg>}
           </button>
-          <span className="text-[10px] font-black uppercase tracking-[0.2em] text-white/20">{isMuted ? 'Muted' : 'Mute'}</span>
+          <span className="text-[10px] font-black uppercase text-white/20">{isMuted ? 'Muted' : 'Mute'}</span>
         </div>
-
         <div className="flex flex-col items-center gap-3">
-          <button 
-            onClick={onClose}
-            className="w-20 h-20 bg-red-600 rounded-full flex items-center justify-center shadow-[0_20px_50px_rgba(220,38,38,0.5)] hover:bg-red-500 transition-all active:scale-90"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 rotate-[135deg]" viewBox="0 0 20 20" fill="currentColor">
-              <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z" />
-            </svg>
+          <button onClick={onClose} className="w-20 h-20 bg-red-600 rounded-full flex items-center justify-center shadow-2xl shadow-red-500/40 hover:bg-red-500 transition-all">
+            <svg className="h-10 w-10 rotate-[135deg]" viewBox="0 0 20 20" fill="currentColor"><path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z" /></svg>
           </button>
-          <span className="text-[10px] font-black uppercase tracking-[0.2em] text-red-500">End</span>
+          <span className="text-[10px] font-black uppercase text-red-500">End</span>
         </div>
-
         <div className="flex flex-col items-center gap-3">
           <button className="w-16 h-16 rounded-full bg-white/5 border border-white/10 text-white/20 flex items-center justify-center cursor-not-allowed">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-7 w-7" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
-            </svg>
+            <svg className="h-7 w-7" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" /></svg>
           </button>
-          <span className="text-[10px] font-black uppercase tracking-[0.2em] text-white/10">Info</span>
+          <span className="text-[10px] font-black uppercase text-white/10">Info</span>
         </div>
       </div>
 
-      <style dangerouslySetInnerHTML={{ __html: `
-        @keyframes float {
-          0%, 100% { transform: translateY(0); }
-          50% { transform: translateY(-20px); }
-        }
-        .animate-float {
-          animation: float 6s ease-in-out infinite;
-        }
-      `}} />
+      <style dangerouslySetInnerHTML={{ __html: `.animate-float { animation: float 6s ease-in-out infinite; } @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-20px); } }`}} />
     </div>
   );
 };
