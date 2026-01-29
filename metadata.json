@@ -1,0 +1,7 @@
+{
+  "name": "Saath - Your Elder Brother/Sister",
+  "description": "A safe, empathetic AI companion designed to support girls and boys who feel stuck or scared, providing a non-judgmental space to talk and find solutions.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
